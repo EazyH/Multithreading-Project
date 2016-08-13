@@ -18,15 +18,14 @@
 
 #include <semaphore.h> // sem_open(), sem_wait(), sem_post(), sem_t TYPE
 #include <stdlib.h> // exit()
-#include <stdio.h> // printf(), fgets()
-#include <unistd.h> // fork(), getpid(), sleep() etc.
+#include <stdio.h> // printf()
+#include <unistd.h> // fork(), getpid(), sleep(), read(), etc.
 #include <fcntl.h> // sem_open(O_CREAT)
-#include <string.h> // memcpy()
-#include <stdbool.h> // false, true
+#include <stdbool.h> // bool TYPE
 #include <sys/shm.h> // shmget(), shmat(), shmdt(), shmctl(), etc.
 #include <sys/ipc.h> // key_t TYPE
 #include <sys/types.h> // key_t TYPE, pid_t TYPE
-#include <signal.h> // sigaction()
+#include <signal.h> // signal()
 #include <time.h> // usleep()
 #include <errno.h> // perror()
 
@@ -40,13 +39,23 @@ char semNameConsumption[] = "/2SEMAPHOREconsumptionPOSIXn"; // Nazwanie semafora
 char semNameConsumption2[] = "/3SEMPAHOREconsumption2POSIXn"; // Nazwanie semafora konsumenta drugiego
 char semNameEnd[] = "/4SEMAPHOREendPOSIXn"; // Nazwanie semafora konca
 
+sem_t *mutexProduction; // Semefor produkcyjny obslugiwany przez P1/P2/P3
+sem_t *mutexConsumption; // Semafor konsumpcyjny pierwszy obslugiwany przez P1/P2
+sem_t *mutexConsumption2; // Semefor konsumpcyjny drugi obslugiwany przez P2/P3
+sem_t *mutexEnd; // Semafor konca obslugiwany przez PM/P3
+
+int fileData; // Deskryptor pliku
+char fileName[FILENAMELIMIT] = "/dev/urandom"; // Tablica przechowujaca nazwe pliku
+
+int dsxALPHA[2]; // Uchwyty na deskryptory odczytu/zapisu dla pipe
+      	 
 pid_t PID1; // PID procesu P1
 pid_t PID2; // PID procesu P2
 pid_t PID3; // PID procesu P3
 
-char *flagsPointer; // Wskaznik na pamiec dzielona przechowujaca flagi sygnalowe
-char *memoryPointer; // Wskaznik na pamiec dzielona przechowujaca pojedyncze znaki z ciagu
+char *flagsPointer; // Wskaznik na pamiec dzielona przechowujaca flagi stanu i flage trybu
 int flagsSegID; // ID segmentu pamieci dzielonej flagowej
+char *memoryPointer; // Wskaznik na pamiec dzielona przechowujaca pojedyncze znaki z ciagu
 int charSegID; // ID segmentu pamieci dzielonej znakowej
 
 void quitP1(int); // Prototyp funkcji quitP1()
@@ -58,14 +67,14 @@ void stopP3(int); // Prototyp funkcji stopP3()
 void resumeP1(int); // Prototyp funkcji resumeP1()
 void resumeP2(int); // Prototyp funkcji resumeP2()
 void resumeP3(int); // Prototyp funkcji resumeP3()
-void systemCleanPM(); // Prototyp funkcji systemCleanPM()
+void systemCleanPM(void); // Prototyp funkcji systemCleanPM()
 int clearBuffer(char); // Prototyp funkcji clearBuffer()
 
 int main(int argc, const char *argv[]){
     
 	setbuf(stdout, NULL); // Wylaczenie buforowania STDOUT
 
-	key_t KEY_flags = 0x2AB; // Identyfikator segmentu pamieci
+	key_t KEY_flags = 0x2AB; // Identyfikator segmentu pamieci flagowej
     
 	if((flagsSegID = shmget(KEY_flags, sizeof(char)*4, 0666 | IPC_CREAT)) < 0) perror("SHMGET(FLAGS) - PM"); // Pobranie ID pamieci wspoldzielonej
 	if((flagsPointer = shmat(flagsSegID, NULL, 0))  == (char *) -1) perror("SHMAT(FLAGS) - PM"); // Przylaczenie sie do segmentu pamieci dzielonej flagowej
@@ -76,7 +85,7 @@ int main(int argc, const char *argv[]){
     
 	char data[CHARLIMIT] = {}; // Tablica przechowujaca pojedyncze znaki z ciagu
     
-	key_t KEY_char = 0x29A; // Identyfikator segmentu pamieci
+	key_t KEY_char = 0x29A; // Identyfikator segmentu pamieci znakowej
     
 	if((charSegID = shmget(KEY_char, sizeof(data), 0666 | IPC_CREAT)) < 0) perror("SHMGET(CHAR) - PM"); // Pobranie ID segmentu pamieci wspoldzielonej
 	if((memoryPointer = shmat(charSegID, NULL, 0)) == (char *) -1) perror("SHMAT(CHAR) - PM"); // Przylaczenie sie do segmentu pamieci dzielonej znakowej
@@ -88,23 +97,16 @@ int main(int argc, const char *argv[]){
     	signal(signalIgnore, SIG_IGN); // Zignorowanie wszystkich sygnalow przez proces PM
        	 
 	}
-    
-	sem_t *mutexProduction; // Semefor produkcyjny obslugiwany przez P1/P2/P3
-	sem_t *mutexConsumption; // Semafor konsumpcyjny pierwszy obslugiwany przez P1/P2
-   	sem_t *mutexConsumption2; // Semefor konsumpcyjny drugi obslugiwany przez P2/P3
-   	sem_t *mutexEnd; // Semafor konca obslugiwany przez PM/P3
-      	 
+    	 
 	if((mutexProduction = sem_open(semNameProduction, O_CREAT, 0666, 1)) == SEM_FAILED) perror("SEM_OPEN(P) - PM"); // Stworzenie semafora producenta i podniesienie go
 	if((mutexConsumption = sem_open(semNameConsumption, O_CREAT, 0666, 0)) == SEM_FAILED) perror("SEM_OPEN(C1) - PM"); // Stworzenie semafora konsumenta pierwszego i opuszczenie go
 	if((mutexConsumption2 = sem_open(semNameConsumption2, O_CREAT, 0666, 0)) == SEM_FAILED) perror("SEM_OPEN(C2) - PM"); // Stworzenie semafora konsumenta drugiego i opuszczenie go
 	if((mutexEnd = sem_open(semNameEnd, O_CREAT, 0666, 0)) == SEM_FAILED) perror("SEM_OPEN(E) - PM"); // Stworzenie semafora konca i podniesienie go
     
-	usleep(100000);
-    
 	if(!fork()){ // STWORZENIE PROCESU PIERWSZEGO
   	 
     	if((sem_close(mutexConsumption2)) == -1) perror("SEM_CLOSE(C2) - P1"); // Zamkniecie semafora konsumenta drugiego dla procesu P1
-        if((sem_close(mutexEnd)) == -1) perror("SEM_CLOSE(E) - P1"); // Zamkniecie semafora konca dla procesu P1
+    	if((sem_close(mutexEnd)) == -1) perror("SEM_CLOSE(E) - P1"); // Zamkniecie semafora konca dla procesu P1
       	 
        	PID1 = getpid(); // Pobranie PIDu procesu P1
       	 
@@ -112,8 +114,6 @@ int main(int argc, const char *argv[]){
     	signal(SIGQUIT, quitP1); // Obsluga sygnalu zakoczenia
       	 
     	char option; // Opcja wprowadzania danych
-    	bool end = false; // Zmienna okreslajaca czy pobrano caly ciag (np. po obsludze przerwania)
-    	bool first = true; // Zmienna pomagajaca wyswietlic prawidlowo wyniki dla option == '1'
     	int decision = -1; // Zmienna okreslajaca czy wybrano prawidlowa opcje
        	 
     	do{ // Menu
@@ -136,10 +136,13 @@ int main(int argc, const char *argv[]){
     	while(decision != 1); // Pytaj dopoki decyzcja nie bedzie pozytywna
    	 
     	if(option == '1'){ // Jezeli wybrano wprowadzanie z klawiatury
-        	 
+       	 
+        	bool end = false; // Zmienna okreslajaca czy pobrano caly ciag (wypisywanie nowych linii)
+        	bool first = true; // Zmienna pomagajaca wyswietlic prawidlowo wyniki dla option == '1'
+       	 
         	*(flagsPointer+3) = 'K'; // Podniesienie flagi trybu 'K' - keyboard
                   	 
-        	while(*flagsPointer != 'Q' || end != true){
+        	while(true){
                                   	 
             	sem_wait(mutexProduction); // Opuszczenie semafora producenta
 	 
@@ -164,101 +167,77 @@ int main(int argc, const char *argv[]){
     	else if(option == '2'){ // Jezeli wybrano wprowadzanie z wlasnego pliku
           	 
            	*(flagsPointer+3) = 'O'; // Podniesienie flagi trybu 'O' - own file
-          	 
-        	char fileName[FILENAMELIMIT]; // Tablica przechowujaca nazwe pliku
-        	int fileData; // Deskryptor pliku
-
+              	 
         	do{    
       	 
-                printf("INPUT YOUR FILE NAME: ");
+            	printf("INPUT YOUR FILE NAME: ");
                	scanf("%s", fileName); // Podanie nazwy pliku z danymi
                	fileData = open(fileName, O_RDONLY); // Otwarcie pliku tylko do odczytu
-                printf("\033[H\033[J"); // Wyczyszczenie ekranu
+            	printf("\033[H\033[J"); // Wyczyszczenie ekranu
                	 
             	if(fileData == -1) perror("OPEN() - OWN FILE"); // Jezeli zla nazwa zwroc blad
 
-            }    
+        	}    
         	while(fileData == -1); // Wczytywanie nazwy dopoki bedzie prawidlowa
        	 
-           	while(*(flagsPointer+1) != 'Q' || end != true){
+           	while(true){
  
             	sem_wait(mutexProduction); // Opuszczenie semafora producenta
-               	
-               	if(end == true) end = false; // Stwierdzenie ze wczytywany jest nowy ciag
-               	
+              	 
             	if(read(fileData, &data, CHARLIMIT) == 0) quitP1(3); // Wczytywanie danych do tablicy 1 - elementowej, jezeli EOF zakoncz program
                   	 
             	*memoryPointer = data[0]; // Zapisanie znaku do pamieci dzielonej
                	 
-            	if(data[0] == '\n') end = true; // Jezeli wystapil znak nowej linii to zmienna end = true
-               	 
                	sem_post(mutexConsumption); // Podniesienie semafora konsumenta pierwszego
       	 
         	}
-       	 
-    		if((close(fileData)) == -1) perror("CLOSE(OWN FILE) - P1"); // Zamkniecie pliku
-   	 
+               	 
     	}
    	 
     	else if(option == '3'){ // Jezeli wybrano wprowadzanie z pliku /dev/urandom
    	 
-    		*(flagsPointer+3) = 'U'; // Podniesienie flagi trybu 'U' - urandom file
+        	*(flagsPointer+3) = 'U'; // Podniesienie flagi trybu 'U' - urandom file
    	 
-    		char fileName[FILENAMELIMIT] = "/dev/urandom"; // Tablica przechowujaca nazwe pliku
-    		int fileData; // Deskryptor pliku
-
-    		do{    
-      	 	 
+        	do{    
+           	 
                	fileData = open(fileName, O_RDONLY); // Otwarcie pliku tylko do odczytu
-                printf("\033[H\033[J"); // Wyczyszczenie ekranu
+            	printf("\033[H\033[J"); // Wyczyszczenie ekranu
                	 
             	if(fileData == -1){
                    	 
-                    perror("OPEN() - URANDOM FILE"); // Jezeli zla sciezka zwroc blad
-                    printf("INPUT URANDOM FILE PATH: ");
-                    scanf("%s", fileName); // Podanie nazwy pliku z danymi
+                	perror("OPEN() - URANDOM FILE"); // Jezeli zla sciezka zwroc blad
+                	printf("INPUT URANDOM FILE PATH: ");
+                	scanf("%s", fileName); // Podanie nazwy pliku z danymi
               	 
             	}
-				    
-            }
+               	 
+        	}
         	while(fileData == -1); // Wczytywanie nazwy dopoki bedzie prawidlowa
 
-           	while(*flagsPointer != 'Q' || end != true){  
+           	while(true){  
 
             	sem_wait(mutexProduction); // Opuszczenie semafora producenta, $
 	 
-	 			if(end == true) end = false; // Stwierdzenie ze wczytywany jest nowy ciag
-	 			
             	read(fileData, &data, CHARLIMIT); // Wczytywanie danych do tablicy 1 - elementowej
 
             	*memoryPointer = data[0]; // Zapisanie znaku do pamieci dzielonej
-
-            	if(data[0] == '\n') end = true; // Jezeli wystapil znak nowej linii to zmienna end = true
-
+           	 
             	sem_post(mutexConsumption); // Podniesienie semafora konsumenta pierwszego
 
         	}
-
-        	if((close(fileData)) == -1) perror("CLOSE(URANDOM FILE) - P1"); // Zamkniecie pliku
           	 
     	}
-            	 
-    	if((sem_close(mutexProduction)) == -1) perror("SEM_CLOSE(P) - P1"); // Zamkniecie semafora producenta dla procesu P1
-    	if((sem_close(mutexConsumption)) == -1) perror("SEM_CLOSE(C1) - P1"); // Zamkniecie semafora konsumenta pierwszego dla procesu P1
-    	if((shmdt(memoryPointer)) == -1) perror("SHMDT(CHAR) - P1"); // Odlaczenie pamieci dzielonej dla procesu P1
-      	if((shmdt(flagsPointer)) == -1) perror("SHMDT(FLAGS) - P1"); // Odlaczenie pamieci dzielonej dla procesu P1
-     	 
-    	exit(0); // Zakonczenie procesu P1
-       	 
+                    	 
+    	exit(1); // Niepoprawne zamkniecie procesu
+                        	 
 	}    
 
-	int dsxALPHA[2]; // Uchwyty na deskryptory odczytu/zapisu
 	if((pipe(dsxALPHA)) == -1) perror("PIPE() - PM"); // Utworzenie lacza nienazwanego
    	 
 	if(!fork()){ // STWORZENIE PROCESU DRUGIEGO
    	 
-        if((close(dsxALPHA[RDX])) == -1) perror("CLOSE(RDX) - P2"); // Zamkniecie odczytu z potoku dla procesu P2 (jako producent)
-        if((sem_close(mutexEnd)) == -1) perror("SEM_CLOSE(E) - P2"); // Zamkniecie semafora konca dla procesu P2
+    	if((close(dsxALPHA[RDX])) == -1) perror("CLOSE(RDX) - P2"); // Zamkniecie odczytu z potoku dla procesu P2 (jako producent)
+    	if((sem_close(mutexEnd)) == -1) perror("SEM_CLOSE(E) - P2"); // Zamkniecie semafora konca dla procesu P2
                	 
     	PID2 = getpid(); // Pobranie PIDu procesu P2
        	 
@@ -269,12 +248,12 @@ int main(int argc, const char *argv[]){
     	int counter = 0; // Licznik znakow
     	bool end = false; // Zmienna
        	 
-    	while(*(flagsPointer+1) != 'Q' || end != true){ // Odczytywanie danych z pamieci dzielonej od procesu P1 i wysylanie laczem do procesu P3
+    	while(true){ // Odczytywanie danych z pamieci dzielonej od procesu P1 i wysylanie laczem do procesu P3
 
         	sem_wait(mutexConsumption); // Opuszczenie semafora konsumenta pierwszego
-          	
+         	 
           	if(end == true) end = false; // Stwierdzenie ze wczytywany jest nowy ciag
-          	
+         	 
            	counter++; // Zliczanie znakow w pojedynczym ciagu
  
         	if(*memoryPointer != '\n') sem_post(mutexProduction); // Jesli nie pobrano calego ciagu, wczytuj dalej
@@ -288,20 +267,11 @@ int main(int argc, const char *argv[]){
         	}
        	 
     	}
+   	 
+    	exit(1); // Niepoprawne zamkniecie procesu
 
-    	usleep(200000); // Danie czasu na zakonczenie procesu P1
-   	 
-    	if((close(dsxALPHA[WRX])) == -1) perror("CLOSE(WRX) - P2"); // Zamkniecie zapisu do potoku dla procesu P2
-    	if((sem_close(mutexProduction)) == -1) perror("SEM_CLOSE(P) - P2"); // Zamkniecie semafora konsumenta pierwszego dla procesu P2
-    	if((sem_close(mutexConsumption)) == -1) perror("SEM_CLOSE(C1) - P2"); // Zamkniecie semafora konsumenta pierwszego dla procesu P2
-    	if((sem_close(mutexConsumption2)) == -1) perror("SEM_CLOSE(C2) - P2"); // Zamkniecie semafora konsumenta drugiego dla procesu P2
-    	if((shmdt(memoryPointer)) == -1) perror("SHMDT(CHAR) - P2"); // Odlaczenie pamieci dzielonej znakowej dla procesu P2
-    	if((shmdt(flagsPointer)) == -1) perror("SHMDT(FLAGS) - P2"); // Odlaczenie pamieci dzielonej flagowej dla procesu P2
-   	 
-    	exit(0); // Zakonczenie procesu P2
-     	 
 	}
-     
+	 
 	if(!fork()){ // STWORZENIE PROCESU TRZECIEGO
       	 
        	if((sem_close(mutexConsumption)) == -1) perror("SEM_CLOSE(C1) - P3"); // Zamkniecie semafora konsumenta pierwszego dla procesu P3
@@ -319,12 +289,12 @@ int main(int argc, const char *argv[]){
     	while(*(flagsPointer+2) != 'Q'){
        	 
         	sem_wait(mutexConsumption2); // Opuszczenie semafora konsumenta drugiego
-				       	 
+                       	 
            	read(dsxALPHA[RDX], &value, sizeof(value)); // Odczytanie liczby znakow od procesu P2      	 
 
         	printf("%d ", value); // Wypisanie liczby znakow na STDOUT
-			       	 
-            if(*(flagsPointer+3) != 'K'){
+                   	 
+        	if(*(flagsPointer+3) != 'K'){
            	 
             	newline++; // Zwiekszenie licznika jednostek
        	 
@@ -340,19 +310,9 @@ int main(int argc, const char *argv[]){
         	sem_post(mutexProduction); // Podniesienie semafora producenta
 
     	}
-   	 
-    	usleep(400000); // Danie czasu na zakoczenie procesow P1 i P2
-   	 
-    	if((close(dsxALPHA[RDX])) == -1) perror("CLOSE(RDX) - P3"); // Zamkniecie odczytu do potoku dla procesu P3
-    	if((sem_close(mutexProduction)) == -1) perror("SEM_CLOSE(P) - P3"); // Zamkniecie semafora producenta dla procesu P3
-    	if((sem_close(mutexConsumption2)) == -1) perror("SEM_CLOSE(C2) - P3"); // Zamkniecie semafora konsumenta drugiego dla procesu P3
-    	if((shmdt(flagsPointer)) == -1) perror("SHMDT(FLAGS) - P3"); // Odlaczenie pamieci dzielonej flagowej dla procesu P3
-   	 
-    	sem_post(mutexEnd); // Podniesienie semafora konca (oznacza zakonczenie dzialania programu)
-    	if((sem_close(mutexEnd)) == -1) perror("SEM_CLOSE(E) - P3"); // Zamkniecie semafora konca dla procesu P3
-   	 
-    	exit(0); // Zakonczenie procesu P3
 
+    	exit(1); // Niepoprawne zamkniecie procesu
+   	 
 	}
 
 	if((close(dsxALPHA[RDX])) == -1) perror("CLOSE(RDX) - PM"); // Zamkniecie odczytu do potoku dla procesu PM
@@ -383,11 +343,19 @@ void quitP1(int signalX){ // Funkcja konczaca proces P1
     
 	if(*flagsPointer != 'Q') *flagsPointer = 'Q'; // Podniesienie flagi zakonczenia dla procesu P1
 
-	usleep(200000); // Zapobiega powielaniu sygnalow
+	usleep(100000); // Zapobiega powielaniu sygnalow
    
 	if(*(flagsPointer+1) != 'Q') kill(PID2, SIGQUIT); // Wyslanie sygnalu do procesu P2 jesli nie byl wczesniej wyslany
 	if(*(flagsPointer+2) != 'Q') kill(PID3, SIGQUIT); // Wyslanie sygnalu do procesu P3 jesli nie byl wczesniej wyslany
-           	 
+    
+	if(*(flagsPointer+3) != 'K') if((close(fileData)) == -1) perror("CLOSE(OWN FILE) - P1"); // Zamkniecie pliku
+	if((sem_close(mutexProduction)) == -1) perror("SEM_CLOSE(P) - P1"); // Zamkniecie semafora producenta dla procesu P1
+	if((sem_close(mutexConsumption)) == -1) perror("SEM_CLOSE(C1) - P1"); // Zamkniecie semafora konsumenta pierwszego dla procesu P1
+	if((shmdt(memoryPointer)) == -1) perror("SHMDT(CHAR) - P1"); // Odlaczenie pamieci dzielonej dla procesu P1
+	if((shmdt(flagsPointer)) == -1) perror("SHMDT(FLAGS) - P1"); // Odlaczenie pamieci dzielonej dla procesu P1
+	 
+	exit(0);
+    
 }
 
 void quitP2(int signalX){ // Funkcja konczaca proces P2
@@ -398,11 +366,20 @@ void quitP2(int signalX){ // Funkcja konczaca proces P2
     
 	if(*(flagsPointer+1) != 'Q') *(flagsPointer+1) = 'Q'; // Podniesienie flagi zakonczenia dla procesu P2
     
-	usleep(200000); // Zapobiega powielaniu sygnalow
+	usleep(100000); // Zapobiega powielaniu sygnalow
     
 	if(*flagsPointer != 'Q') kill(PID1, SIGQUIT); // Wyslanie sygnalu do procesu P1 jesli nie byl wczesniej wyslany
 	if(*(flagsPointer+2) != 'Q') kill(PID3, SIGQUIT); // Wyslanie sygnalu do procesu P3 jesli nie byl wczesniej wyslany
+
+	if((close(dsxALPHA[WRX])) == -1) perror("CLOSE(WRX) - P2"); // Zamkniecie zapisu do potoku dla procesu P2
+	if((sem_close(mutexProduction)) == -1) perror("SEM_CLOSE(P) - P2"); // Zamkniecie semafora konsumenta pierwszego dla procesu P2
+	if((sem_close(mutexConsumption)) == -1) perror("SEM_CLOSE(C1) - P2"); // Zamkniecie semafora konsumenta pierwszego dla procesu P2
+	if((sem_close(mutexConsumption2)) == -1) perror("SEM_CLOSE(C2) - P2"); // Zamkniecie semafora konsumenta drugiego dla procesu P2
+	if((shmdt(memoryPointer)) == -1) perror("SHMDT(CHAR) - P2"); // Odlaczenie pamieci dzielonej znakowej dla procesu P2
+	if((shmdt(flagsPointer)) == -1) perror("SHMDT(FLAGS) - P2"); // Odlaczenie pamieci dzielonej flagowej dla procesu P2
    	 
+  	exit(0);
+       	 
 }
 
 void quitP3(int signalX){ // Funkcja konczaca proces P3
@@ -413,11 +390,21 @@ void quitP3(int signalX){ // Funkcja konczaca proces P3
 
 	if(*(flagsPointer+2) != 'Q') *(flagsPointer+2) = 'Q'; // Podniesienie flagi zakonczenia dla procesu P3
     
-	usleep(200000); // Zapobiega powielaniu sygnalow
+	usleep(100000); // Zapobiega powielaniu sygnalow
     
 	if(*flagsPointer != 'Q') kill(PID1, SIGQUIT); // Wyslanie sygnalu do procesu P1 jesli nie byl wczesniej wyslany
 	if(*(flagsPointer+1) != 'Q') kill(PID2, SIGQUIT); // Wyslanie sygnalu do procesu P2 jesli nie byl wczesniej wyslany
+	 
+	if((close(dsxALPHA[RDX])) == -1) perror("CLOSE(RDX) - P3"); // Zamkniecie odczytu do potoku dla procesu P3
+	if((sem_close(mutexProduction)) == -1) perror("SEM_CLOSE(P) - P3"); // Zamkniecie semafora producenta dla procesu P3
+	if((sem_close(mutexConsumption2)) == -1) perror("SEM_CLOSE(C2) - P3"); // Zamkniecie semafora konsumenta drugiego dla procesu P3
+	if((shmdt(flagsPointer)) == -1) perror("SHMDT(FLAGS) - P3"); // Odlaczenie pamieci dzielonej flagowej dla procesu P3
    	 
+	sem_post(mutexEnd); // Podniesienie semafora konca (oznacza zakonczenie dzialania programu)
+	if((sem_close(mutexEnd)) == -1) perror("SEM_CLOSE(E) - P3"); // Zamkniecie semafora konca dla procesu P3
+   	 
+	exit(0);
+	 
 }
 
 void stopP1(int signalX){ // Funkcja zatrzymujaca proces P1
@@ -428,7 +415,7 @@ void stopP1(int signalX){ // Funkcja zatrzymujaca proces P1
     
 	if (*flagsPointer == 'W') *flagsPointer = 'S'; // Podniesienie flagi zatrzymania dla procesu P1
 
-	usleep(200000); // Zapobiega powielaniu sygnalow
+	usleep(100000); // Zapobiega powielaniu sygnalow
     
 	if(*(flagsPointer+1) == 'W') kill(PID2, SIGILL); // Wyslanie sygnalu do procesu P2 jesli nie byl wczesniej wyslany  
 	if(*(flagsPointer+2) == 'W') kill(PID3, SIGILL); // Wyslanie sygnalu do procesu P3 jesli nie byl wczesniej wyslany
@@ -448,7 +435,7 @@ void stopP2(int signalX){ // Funkcja zatrzymujaca proces P2
     
 	if (*(flagsPointer+1) == 'W') *(flagsPointer+1) = 'S'; // Podniesienie flagi zatrzymania dla procesu P2
     
-	usleep(200000); // Zapobiega powielaniu sygnalow
+	usleep(100000); // Zapobiega powielaniu sygnalow
     
 	if(*(flagsPointer) == 'W') kill(PID1, SIGILL); // Wyslanie sygnalu do procesu P1 jesli nie byl wczesniej wyslany  
 	if(*(flagsPointer+2) == 'W') kill(PID3, SIGILL); // Wyslanie sygnalu do procesu P3 jesli nie byl wczesniej wyslany
@@ -468,7 +455,7 @@ void stopP3(int signalX){ // Funkcja zatrzymujaca proces P3
     
  	if (*(flagsPointer+2) == 'W') *(flagsPointer+2) = 'S'; // Podniesienie flagi zatrzymania dla procesu P3
 
-	usleep(200000); // Zapobiega powielaniu sygnalow
+	usleep(100000); // Zapobiega powielaniu sygnalow
     
 	if(*(flagsPointer) == 'W') kill(PID1, SIGILL); // Wyslanie sygnalu do procesu P1 jesli nie byl wczesniej wyslany
 	if(*(flagsPointer+1) == 'W') kill(PID2, SIGILL); // Wyslanie sygnalu do procesu P2 jesli nie byl wczesniej wyslany
@@ -488,7 +475,7 @@ void resumeP1(int signalX){ // Funkcja wznawiajaca proces P1
     
 	if (*flagsPointer == 'S') *flagsPointer = 'W'; // Podniesienie flagi wznowienia dla procesu P1
 
-	usleep(200000); // Zapobiega powielaniu sygnalow
+	usleep(100000); // Zapobiega powielaniu sygnalow
     
 	if(*(flagsPointer+1) == 'S') kill(PID2, SIGTRAP); // Wyslanie sygnalu do procesu P2 jesli nie byl wczesniej wyslany
 	if(*(flagsPointer+2) == 'S') kill(PID3, SIGTRAP); // Wyslanie sygnalu do procesu P3 jesli nie byl wczesniej wyslany
@@ -506,7 +493,7 @@ void resumeP2(int signalX){ // Funkcja wznawiajaca proces P2
     
 	if (*(flagsPointer+1) == 'S') *(flagsPointer+1) = 'W'; // Podniesienie flagi wznowienia dla procesu P2
 
-	usleep(200000); // Zapobiega powielaniu sygnalow
+	usleep(100000); // Zapobiega powielaniu sygnalow
     
 	if(*(flagsPointer) == 'S') kill(PID1, SIGTRAP); // Wyslanie sygnalu do procesu P1 jesli nie byl wczesniej wyslany
 	if(*(flagsPointer+2) == 'S') kill(PID3, SIGTRAP); // Wyslanie sygnalu do procesu P3 jesli nie byl wczesniej wyslany
@@ -524,7 +511,7 @@ void resumeP3(int signalX){ // Funkcja wznawiajaca proces P3
     
 	if (*(flagsPointer+2) == 'S') *(flagsPointer+2) = 'W'; // Podniesienie flagi wznowienia dla procesu P3
 
-	usleep(200000); // Zapobiega powielaniu sygnalow
+	usleep(100000); // Zapobiega powielaniu sygnalow
     
 	if(*(flagsPointer) == 'S') kill(PID1, SIGTRAP); // Wyslanie sygnalu do procesu P1 jesli nie byl wczesniej wyslany
 	if(*(flagsPointer+1) == 'S') kill(PID2, SIGTRAP); // Wyslanie sygnalu do procesu P2 jesli nie byl wczesniej wyslany
@@ -548,9 +535,9 @@ int clearBuffer(char option){ // Funkcja czyszczaca bufor po blednym wybraniu op
     
 }
 
-void systemCleanPM(){ // Funkcja zwalniajaca zasoby przez PM
+void systemCleanPM(void){ // Funkcja zwalniajaca zasoby przez PM
     
-	usleep(200000); // Danie czasu na poprawne zakonczenie procesow P1, P2 i P3
+	usleep(400000); // Danie czasu na poprawne zakonczenie procesow P1, P2 i P3
     
 	if((sem_unlink(semNameProduction)) == -1) perror("SEM_UNLINK() - P"); // Odlaczenie semafora producenta
 	if((sem_unlink(semNameConsumption)) == -1) perror("SEM_UNLINK() - C1"); // Odlaczenie semafora konsumenta pierwszego
@@ -560,5 +547,6 @@ void systemCleanPM(){ // Funkcja zwalniajaca zasoby przez PM
 	if((shmctl(flagsSegID, IPC_RMID, NULL)) == -1) perror("SHMCTL() - FLAGS"); // Usuniecie pamieci dzielonej
     
 }
+
 
 
